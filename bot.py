@@ -60,12 +60,6 @@ class GhostBot(commands.Bot):
             activity=discord.Game(name="1609 — Ryukyu Kingdom")
         )
 
-    async def on_interaction(self, interaction: discord.Interaction):
-        # Route overworld encounter triggers from map_view end_turn
-        if interaction.type == discord.InteractionType.component:
-            pass
-        await super().on_interaction(interaction)
-
     async def on_command_error(self, ctx, error):
         log.error("Command error: %s", error)
 

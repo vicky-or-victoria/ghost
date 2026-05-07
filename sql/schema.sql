@@ -1,6 +1,19 @@
 -- Ghost of Ryukyu — Complete Schema v1.0
 -- All tables scoped by guild_id. No data crosses Discord servers.
 
+-- Migrations: add missing columns to pre-existing guild_config tables
+DO $$ BEGIN
+    ALTER TABLE guild_config ADD COLUMN IF NOT EXISTS announcement_channel_id BIGINT;
+    ALTER TABLE guild_config ADD COLUMN IF NOT EXISTS hall_of_fame_channel_id  BIGINT;
+    ALTER TABLE guild_config ADD COLUMN IF NOT EXISTS leaderboard_channel_id   BIGINT;
+    ALTER TABLE guild_config ADD COLUMN IF NOT EXISTS commands_channel_id      BIGINT;
+    ALTER TABLE guild_config ADD COLUMN IF NOT EXISTS menu_channel_id          BIGINT;
+    ALTER TABLE guild_config ADD COLUMN IF NOT EXISTS menu_message_id          BIGINT;
+    ALTER TABLE guild_config ADD COLUMN IF NOT EXISTS gm_role_id               BIGINT;
+EXCEPTION WHEN undefined_table THEN
+    NULL;
+END $$;
+
 CREATE TABLE IF NOT EXISTS guild_config (
     guild_id                BIGINT PRIMARY KEY,
     announcement_channel_id BIGINT,

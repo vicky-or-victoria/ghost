@@ -212,7 +212,9 @@ class PlayerView(View):
         await self._r()
         p       = self.player
         row     = await db.get_story_flags(self.guild_id, self.owner_id)
-        flags   = row.get("flags") or {}
+        _flags  = row.get("flags") or {}
+        import json
+        flags   = json.loads(_flags) if isinstance(_flags, str) else (_flags or {})
         faction = await db.get_faction_standing(self.guild_id, self.owner_id)
         embed   = discord.Embed(
             title=f"Shimazu {p['mc_first_name']} — Journal",

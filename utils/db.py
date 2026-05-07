@@ -27,7 +27,72 @@ async def _apply_schema():
     path = os.path.join(os.path.dirname(__file__), "..", "sql", "schema.sql")
     sql  = open(path).read()
     async with _pool.acquire() as c:
-        await c.execute(sql)
+        statements = _split_sql(sql)
+        for stmt in statements:
+            stmt = stmt.strip()
+            if not stmt:
+                continue
+            try:
+                await c.execute(stmt)
+            except Exception as e:
+                log.warning("Schema stmt warning: %s", e)
+    log.info("Schema applied.")
+
+
+def _split_sql(sql: str) -> list:
+    """Split SQL on semicolons, respecting $$ dollar-quote blocks."""
+    statements = []
+    current    = []
+    in_dollar  = False
+    i          = 0
+    while i < len(sql):
+        if sql[i:i+2] == "$$":
+            in_dollar = not in_dollar
+            current.append("$$")
+            i += 2
+            continue
+        if sql[i] == ";" and not in_dollar:
+            current.append(";")
+            statements.append("".join(current))
+            current = []
+            i += 1
+            continue
+        current.append(sql[i])
+        i += 1
+    if "".join(current).strip():
+        statements.append("".join(current))
+    return statements
+
+
+# JSONB normalisation helper
+_JSONB_COLS = {
+    "players":          ("traits","perks"),
+    "companions":       ("traits",),
+    "band_members":     ("traits","injuries"),
+    "band_memorial":    ("traits_at_death","injuries_at_death"),
+    "story_flags":      ("flags","relationship_tiers"),
+    "contracts":        ("reward",),
+    "faction_standing": ("village_standings",),
+    "items":            (),
+    "player_saves":     ("snapshot",),
+    "tactical_maps":    ("hex_grid","unit_positions","initiative_order"),
+    "hall_of_fame":     ("hall_traits",),
+    "leaderboard_cache":(),
+}
+
+def _norm(row: dict, cols: tuple) -> dict:
+    """Parse any JSONB columns that asyncpg returned as strings."""
+    for col in cols:
+        val = row.get(col)
+        if isinstance(val, str):
+            try:
+                row[col] = json.loads(val)
+            except Exception:
+                row[col] = {}
+        elif val is None:
+            row[col] = [] if col in ("traits","perks","injuries","traits_at_death",
+                                      "injuries_at_death","hall_traits","initiative_order") else {}
+    return row
 
 
 # Guild config
@@ -59,7 +124,7 @@ async def get_player(guild_id: int, owner_id: int) -> dict | None:
         r = await c.fetchrow(
             "SELECT * FROM players WHERE guild_id=$1 AND owner_id=$2", guild_id, owner_id
         )
-        return dict(r) if r else None
+        return _norm(dict(r), _JSONB_COLS["players"]) if r else None
 
 
 async def create_player(guild_id: int, owner_id: int, first_name: str, gender: str) -> dict:
@@ -124,7 +189,7 @@ async def get_companion(guild_id: int, owner_id: int) -> dict | None:
         r = await c.fetchrow(
             "SELECT * FROM companions WHERE guild_id=$1 AND owner_id=$2", guild_id, owner_id
         )
-        return dict(r) if r else None
+        return _norm(dict(r), _JSONB_COLS["companions"]) if r else None
 
 
 async def update_companion(guild_id: int, owner_id: int, **kw):
@@ -148,7 +213,7 @@ async def get_band(guild_id: int, owner_id: int) -> list:
             "SELECT * FROM band_members WHERE guild_id=$1 AND owner_id=$2 AND is_alive=TRUE ORDER BY id",
             guild_id, owner_id
         )
-        return [dict(r) for r in rs]
+        return [_norm(dict(r), _JSONB_COLS["band_members"]) for r in rs]
 
 
 async def get_band_size(guild_id: int, owner_id: int) -> int:
@@ -163,7 +228,7 @@ async def get_band_size(guild_id: int, owner_id: int) -> int:
 async def get_band_member(member_id: int) -> dict | None:
     async with _pool.acquire() as c:
         r = await c.fetchrow("SELECT * FROM band_members WHERE id=$1", member_id)
-        return dict(r) if r else None
+        return _norm(dict(r), _JSONB_COLS["band_members"]) if r else None
 
 
 async def add_band_member(guild_id: int, owner_id: int, name: str, archetype: str, stats: dict) -> dict:
@@ -282,7 +347,17 @@ async def get_story_flags(guild_id: int, owner_id: int) -> dict:
         r = await c.fetchrow(
             "SELECT * FROM story_flags WHERE guild_id=$1 AND owner_id=$2", guild_id, owner_id
         )
-        return dict(r) if r else {}
+        if not r:
+            return {}
+        row = dict(r)
+        # asyncpg may return JSONB columns as strings — normalise here
+        for col in ("flags", "relationship_tiers"):
+            val = row.get(col)
+            if isinstance(val, str):
+                row[col] = json.loads(val)
+            elif val is None:
+                row[col] = {}
+        return row
 
 
 async def update_story_flags(guild_id: int, owner_id: int, **kw):

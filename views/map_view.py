@@ -28,13 +28,21 @@ def _moves_bar_text(left:int, total:int) -> str:
 
 
 class RegionMapView(View):
-    """Standalone view just for the region map image."""
-    def __init__(self):
-        super().__init__(timeout=120)
+    """Standalone view for the region map. Close returns to the overworld viewport."""
+    def __init__(self, guild_id: int, owner_id: int):
+        super().__init__(timeout=300)
+        self.guild_id = guild_id
+        self.owner_id = owner_id
 
-    @discord.ui.button(label="Close", style=discord.ButtonStyle.secondary)
+    @discord.ui.button(label="Back to Map", style=discord.ButtonStyle.secondary)
     async def close(self, i: discord.Interaction, b: Button):
-        await i.response.edit_message(view=None)
+        if i.user.id != self.owner_id:
+            await i.response.send_message("Not your map.", ephemeral=True)
+            return
+        await i.response.defer()
+        map_view = MapView(self.guild_id, self.owner_id)
+        embed, files = await map_view.build_map_embed()
+        await i.edit_original_response(embed=embed, attachments=files, view=map_view)
 
 
 class MapView(View):
@@ -260,7 +268,7 @@ class MapView(View):
         )
         if region_file:
             embed.set_image(url="attachment://region_map.png")
-            await i.edit_original_response(embed=embed, attachments=[region_file], view=RegionMapView())
+            await i.edit_original_response(embed=embed, attachments=[region_file], view=RegionMapView(self.guild_id, self.owner_id))
         else:
             await i.edit_original_response(
                 embed=base_embed("Region Map Unavailable","Map renderer not available.",COLOR_DEFEAT),

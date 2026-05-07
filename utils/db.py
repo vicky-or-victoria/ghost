@@ -502,13 +502,27 @@ async def get_trait_counters(guild_id: int, owner_id: int, unit_id: str) -> dict
 
 # Contracts
 
+_CONTRACT_JSONB = ("reward",)
+
+def _norm_contract(d: dict) -> dict:
+    for col in _CONTRACT_JSONB:
+        val = d.get(col)
+        if isinstance(val, str):
+            try:
+                d[col] = json.loads(val)
+            except Exception:
+                d[col] = {}
+        elif val is None:
+            d[col] = {}
+    return d
+
 async def get_contracts(guild_id: int, owner_id: int, status: str = "available") -> list:
     async with _pool.acquire() as c:
         rs = await c.fetch(
             "SELECT * FROM contracts WHERE guild_id=$1 AND owner_id=$2 AND status=$3 ORDER BY generated_at DESC",
             guild_id, owner_id, status
         )
-        return [dict(r) for r in rs]
+        return [_norm_contract(dict(r)) for r in rs]
 
 
 async def get_active_contract(guild_id: int, owner_id: int) -> dict | None:
@@ -517,7 +531,7 @@ async def get_active_contract(guild_id: int, owner_id: int) -> dict | None:
             "SELECT * FROM contracts WHERE guild_id=$1 AND owner_id=$2 AND status='active'",
             guild_id, owner_id
         )
-        return dict(r) if r else None
+        return _norm_contract(dict(r)) if r else None
 
 
 async def create_contract(guild_id: int, owner_id: int, data: dict) -> dict:

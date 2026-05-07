@@ -214,16 +214,51 @@ class MapView(View):
                 self.guild_id, self.owner_id
             )
 
+        # Tick active contract turn counter and auto-fail if expired
+        active = await db.get_active_contract(self.guild_id, self.owner_id)
+        if active:
+            new_elapsed = (active.get("turns_elapsed") or 0) + 1
+            turns_allowed = active.get("turns_allowed")
+            if turns_allowed and new_elapsed >= turns_allowed:
+                await db.update_contract(active["id"], status="failed")
+                from utils.loyalty import LOSSES
+                await db.adjust_loyalty(self.guild_id, self.owner_id, LOSSES["abandon_contract"])
+                events.append(f"Contract FAILED: {active['title']}. Loyalty -12.")
+            else:
+                await db.update_contract(active["id"], turns_elapsed=new_elapsed)
+
         cost, paid = await apply_upkeep(self.guild_id, self.owner_id)
         if not paid:
             events.append(f"Upkeep unpaid ({cost} Coin). Loyalty reduced.")
 
         ai_events = await resolve_end_turn_ai(self.guild_id, self.owner_id)
+        encounter_triggered = False
         for ev in ai_events:
-            if ev.startswith("encounter:"):
-                parts = ev.split(":")
-                utype = parts[1].replace("_"," ").title() if len(parts)>1 else "Satsuma"
-                events.append(f"Satsuma encounter: {utype}.")
+            if ev.startswith("encounter:") and not encounter_triggered:
+                parts    = ev.split(":")
+                utype    = parts[1] if len(parts) > 1 else "ashigaru_foot"
+                uid      = int(parts[2]) if len(parts) > 2 else 0
+                utype_label = utype.replace("_"," ").title()
+                events.append(f"Satsuma encounter: {utype_label}. Combat begins.")
+                # Route to combat cog
+                config  = await db.get_guild_config(self.guild_id)
+                channel = None
+                if config and config.get("commands_channel_id"):
+                    channel = i.client.get_channel(config["commands_channel_id"])
+                # Prefer the player's forum thread
+                player_now = await db.get_player(self.guild_id, self.owner_id)
+                if player_now and player_now.get("forum_thread_id"):
+                    thread = i.client.get_channel(player_now["forum_thread_id"])
+                    if thread:
+                        channel = thread
+                if channel:
+                    combat_cog = i.client.cogs.get("CombatCog")
+                    if combat_cog:
+                        import asyncio
+                        asyncio.create_task(
+                            combat_cog.trigger_encounter(
+                                self.guild_id, self.owner_id, utype, uid, channel))
+                encounter_triggered = True  # Only one encounter per End Turn
 
         deserters = await check_desertion(self.guild_id, self.owner_id)
         for d in deserters:
@@ -234,6 +269,16 @@ class MapView(View):
         new_traits = await check_and_assign_mc_traits(self.guild_id, self.owner_id)
         for t in new_traits:
             events.append(f"New trait: {t}.")
+
+        # Check act advancement
+        from utils.story_engine import check_act_advancement
+        next_act = await check_act_advancement(self.guild_id, self.owner_id)
+        if next_act is not None:
+            story_cog = i.client.cogs.get("StoryCog")
+            if story_cog:
+                import asyncio
+                asyncio.create_task(
+                    story_cog._check_and_trigger_act1_scenes(self.guild_id, self.owner_id))
 
         player = await db.get_player(self.guild_id, self.owner_id)
         if player and "Haunted" in (player.get("traits") or []):

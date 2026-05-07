@@ -330,3 +330,45 @@ class PlayerView(View):
     async def back_btn(self, i, b):
         e, f = await self.build_main_embed()
         await i.response.edit_message(embed=e, attachments=f, view=self)
+
+    # Row 2 — Band and Forge
+    @discord.ui.button(label="Band Management", style=discord.ButtonStyle.secondary, custom_id="pp_band_mgmt", row=2)
+    async def band_mgmt_btn(self, i: discord.Interaction, b):
+        if i.user.id != self.owner_id:
+            await i.response.send_message("Not your panel.", ephemeral=True); return
+        player = await db.get_player(self.guild_id, self.owner_id)
+        if not player or player.get("current_act",0) < 1:
+            await i.response.send_message(
+                embed=base_embed("Unavailable","Band Management unlocks at Act 1.",COLOR_DEFEAT),
+                ephemeral=True); return
+        from cogs.band_cog import BandManagementView
+        view  = BandManagementView(self.guild_id, self.owner_id)
+        band_size = await db.get_band_size(self.guild_id, self.owner_id)
+        loyalty   = await db.get_loyalty(self.guild_id, self.owner_id)
+        from utils.embeds import loyalty_state_label
+        lsl = loyalty_state_label(loyalty)
+        embed = base_embed("Band Management",
+            f"Band Size: {band_size}/30  |  Loyalty: {loyalty} ({lsl})\n\n"
+            "Recruit fighters, view your roster, check the memorial, and browse contracts.",
+            COLOR_LOYALTY)
+        await i.response.send_message(embed=embed, view=view, ephemeral=True)
+
+    @discord.ui.button(label="Forge",           style=discord.ButtonStyle.secondary, custom_id="pp_forge",     row=2)
+    async def forge_btn(self, i: discord.Interaction, b):
+        if i.user.id != self.owner_id:
+            await i.response.send_message("Not your panel.", ephemeral=True); return
+        player = await db.get_player(self.guild_id, self.owner_id)
+        if not player or player.get("current_act",0) < 1:
+            await i.response.send_message(
+                embed=base_embed("Unavailable","The Forge unlocks at Act 1 villages.",COLOR_DEFEAT),
+                ephemeral=True); return
+        from cogs.economy_cog import ForgeView
+        from utils.embeds import wallet_line
+        view  = ForgeView(self.guild_id, self.owner_id)
+        wl = wallet_line(player)
+        embed = base_embed("Forge",
+            f"{wl}\n\n"
+            "Forge and upgrade weapons and armor.\n"
+            "Tier 2: Raw Metals  |  Tier 3: Rare Metals  |  Tier 4: Shimazu Steel",
+            COLOR_DEFAULT)
+        await i.response.send_message(embed=embed, view=view, ephemeral=True)

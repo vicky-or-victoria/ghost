@@ -459,6 +459,46 @@ class StoryCog(commands.Cog):
         await self._post_to_commands(guild_id, owner_id, embed,
             view=PathChoiceView(guild_id, owner_id, self))
 
+    async def _check_and_trigger_act1_scenes(self, guild_id: int, owner_id: int):
+        """Called after contract completion or End Turn to auto-fire Act 1 scenes when conditions met."""
+        import utils.db as db2
+        from utils.story_engine import get_flags, set_flags
+        player   = await db2.get_player(guild_id, owner_id)
+        if not player or player.get("current_act", 0) != 1:
+            return
+        flags    = await get_flags(guild_id, owner_id)
+        scene    = player.get("current_scene","")
+        cache    = await db2.get_leaderboard(guild_id)
+        row      = next((r for r in cache if r["owner_id"]==owner_id), {})
+        contracts_done = row.get("contracts_completed", 0)
+        companion = await db2.get_companion(guild_id, owner_id)
+        trust     = companion.get("trust_tier", 0) if companion else 0
+
+        # Scene: Language Breaks — after 3 contracts + companion trust Tier 1+
+        if (not flags.get("LANGUAGE_BREAKS")
+                and contracts_done >= 3
+                and trust >= 1
+                and scene not in ("act1_language","act1_post_language","act1_sora_trace",
+                                  "act1_approaching_choice","act1_path_choice")):
+            await self.scene_act1_language_breaks(guild_id, owner_id)
+            return
+
+        # Scene: Sora Trace — after language breaks + 1 more contract
+        if (flags.get("LANGUAGE_BREAKS")
+                and not flags.get("SORA_TRACE_FOUND")
+                and contracts_done >= 4
+                and scene not in ("act1_sora_trace","act1_approaching_choice","act1_path_choice")):
+            await self.scene_act1_sora_trace(guild_id, owner_id)
+            return
+
+        # Scene: Path Choice — after 5 contracts + language breaks + sora trace
+        if (flags.get("LANGUAGE_BREAKS")
+                and flags.get("SORA_TRACE_FOUND")
+                and contracts_done >= 5
+                and scene not in ("act1_path_choice","act0_complete")):
+            await self.scene_act1_path_choice(guild_id, owner_id)
+            return
+
     async def scene_epilogue(self, guild_id: int, owner_id: int):
         segments = await story.generate_epilogue(guild_id, owner_id)
         opener   = discord.Embed(

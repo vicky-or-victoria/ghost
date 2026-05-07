@@ -106,12 +106,58 @@ class ContractBoardView(View):
             await i.response.send_message(
                 embed=base_embed("No Active Contract","No contract in progress.",COLOR_DEFEAT), ephemeral=True)
             return
+
+        # Check turn limit
+        turns_allowed = active.get("turns_allowed")
+        turns_elapsed = active.get("turns_elapsed", 0)
+        if turns_allowed and turns_elapsed < 1:
+            await i.response.send_message(
+                embed=base_embed("Too Soon",
+                    "You just accepted this contract. Travel to the objective hex first.",
+                    COLOR_DEFEAT), ephemeral=True)
+            return
+
+        # Check objective hex — player must be at or adjacent to it
+        objective_hex = active.get("objective_hex")
+        if objective_hex:
+            player = await db.get_player(self.guild_id, self.owner_id)
+            current = player.get("current_hex","") if player else ""
+            if current != objective_hex:
+                # Parse both and check distance
+                try:
+                    from utils.map_render import parse as mparse
+                    cx,cy = mparse(current)
+                    ox,oy = mparse(objective_hex)
+                    dist  = max(abs(cx-ox), abs(cy-oy))
+                    if dist > 1:
+                        await i.response.send_message(
+                            embed=base_embed("Objective Not Reached",
+                                f"You must travel to the objective area first.\n"
+                                f"Your hex: {current}  |  Objective hex: {objective_hex}\n"
+                                f"Distance: {dist} tiles away.",
+                                COLOR_DEFEAT), ephemeral=True)
+                        return
+                except Exception:
+                    pass  # If parse fails, allow completion
+
         reward = await complete_contract_reward(self.guild_id, self.owner_id, active)
         reward_str = (
             f"Coin +{reward.get('coin',0)}"
             + (f"  Raw Metals +{reward.get('raw_metals',0)}" if reward.get("raw_metals") else "")
             + f"  XP +{reward.get('xp',0)}"
         )
+
+        # Check act advancement after contract completion
+        from utils.story_engine import check_act_advancement
+        next_act = await check_act_advancement(self.guild_id, self.owner_id)
+        if next_act == 1:
+            # Trigger language breaks or sora trace if conditions met
+            story_cog = i.client.cogs.get("StoryCog")
+            if story_cog:
+                import asyncio
+                asyncio.create_task(
+                    story_cog._check_and_trigger_act1_scenes(self.guild_id, self.owner_id))
+
         await i.response.send_message(
             embed=base_embed("Contract Complete",
                 f"**{active['title']}** completed.\n{reward_str}", COLOR_STORY),

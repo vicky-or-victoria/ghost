@@ -1,19 +1,18 @@
 import discord
 from discord.ui import View, Button
 import utils.db as db
-from utils.map_render import render_viewport, explore_around, parse, addr, in_bounds, NAMED_LOCATIONS
+from utils.map_render import render_viewport, explore_around, parse, addr, in_bounds, IMPASSABLE
 from utils.embeds import base_embed, wallet_line, COLOR_DEFAULT, COLOR_DEFEAT, act_label
 from utils.loyalty import apply_upkeep, check_desertion, threshold_effects
 from utils.traits import check_and_assign_mc_traits, remove_haunted_trait
 from utils.satsuma_ai import resolve_end_turn_ai
 
+# 8 directions for square grid
 MOVE_DIRS = {
     "nw": (-1,-1), "n": (0,-1), "ne": (1,-1),
     "w":  (-1, 0),              "e":  (1, 0),
     "sw": (-1, 1), "s": (0, 1), "se": (1, 1),
 }
-
-IMPASSABLE = {"cliff_edge"}
 
 
 class MapView(View):
@@ -23,25 +22,30 @@ class MapView(View):
         self.owner_id = owner_id
 
     async def build_map_embed(self):
-        player  = await db.get_player(self.guild_id, self.owner_id)
+        player = await db.get_player(self.guild_id, self.owner_id)
         if not player:
             return base_embed("No player data.", color=COLOR_DEFEAT), []
+
         cur_hex  = player.get("current_hex","?")
         h        = await db.get_hex(self.guild_id, self.owner_id, cur_hex)
         loc_name = (h.get("location_name") or cur_hex) if h else cur_hex
+        terrain  = (h.get("terrain","?").replace("_"," ").title()) if h else "?"
 
         embed = discord.Embed(
             title=f"Overworld Map — {loc_name}",
             color=COLOR_DEFAULT,
         )
-        embed.add_field(name="Status", value=(
-            f"{wallet_line(player)}\n"
-            f"{act_label(player.get('current_act',1))}  |  "
-            f"Hex: {cur_hex}  |  SPD: {player.get('spd',8)}"
-        ), inline=False)
-        embed.set_footer(text="Use directional buttons to move. End Turn resolves AI and upkeep.")
+        embed.add_field(
+            name="Status",
+            value=(
+                f"{wallet_line(player)}\n"
+                f"{act_label(player.get('current_act',1))}  |  "
+                f"Terrain: {terrain}  |  SPD: {player.get('spd',8)}"
+            ),
+            inline=False,
+        )
+        embed.set_footer(text="8-directional movement on square grid. End Turn resolves AI and upkeep.")
 
-        # Rendered hex map image
         map_file = await render_viewport(self.guild_id, self.owner_id)
         if map_file:
             embed.set_image(url="attachment://map.png")
@@ -52,13 +56,13 @@ class MapView(View):
         if i.user.id != self.owner_id:
             await i.response.send_message("This is not your campaign.", ephemeral=True)
             return
-        player  = await db.get_player(self.guild_id, self.owner_id)
+        player = await db.get_player(self.guild_id, self.owner_id)
         if not player:
             await i.response.send_message("No player data.", ephemeral=True)
             return
-        cx, cy  = parse(player.get("current_hex","30,85"))
-        dx, dy  = MOVE_DIRS[direction]
-        nx, ny  = cx+dx, cy+dy
+        cx, cy   = parse(player.get("current_hex","30,85"))
+        dx, dy   = MOVE_DIRS[direction]
+        nx, ny   = cx+dx, cy+dy
         if not in_bounds(nx, ny):
             await i.response.send_message("Out of bounds.", ephemeral=True)
             return
@@ -68,21 +72,21 @@ class MapView(View):
             await i.response.send_message("Impassable terrain.", ephemeral=True)
             return
 
-        recon        = player.get("recon", 8)
-        explore_rad  = max(1, recon // 4)
+        recon       = player.get("recon", 8)
+        explore_rad = max(1, recon // 4)
         await db.update_player(self.guild_id, self.owner_id, current_hex=new_addr)
         await explore_around(self.guild_id, self.owner_id, new_addr, explore_rad)
         await db.increment_trait_counter(self.guild_id, self.owner_id, "mc", "hexes_explored", 1)
 
-        # Named location arrival
-        h2 = await db.get_hex(self.guild_id, self.owner_id, new_addr)
+        await i.response.defer()
         embed, files = await self.build_map_embed()
+        h2 = await db.get_hex(self.guild_id, self.owner_id, new_addr)
         if h2 and h2.get("is_named_location") and h2.get("location_name"):
             embed.add_field(name=f"Arrived: {h2['location_name']}",
-                value="You have reached a named location.", inline=False)
-        await i.response.edit_message(embed=embed, attachments=files, view=self)
+                value=f"Terrain: {h2.get('terrain','?').replace('_',' ').title()}", inline=False)
+        await i.edit_original_response(embed=embed, attachments=files, view=self)
 
-    # Cardinal row 0
+    # Row 0 — NW  N  NE
     @discord.ui.button(label="NW", style=discord.ButtonStyle.secondary, custom_id="map_nw", row=0)
     async def nw(self, i, b): await self._move(i, "nw")
 
@@ -92,7 +96,7 @@ class MapView(View):
     @discord.ui.button(label="NE", style=discord.ButtonStyle.secondary, custom_id="map_ne", row=0)
     async def ne(self, i, b): await self._move(i, "ne")
 
-    # Row 1 — W, Hex Info, E
+    # Row 1 — W  [Hex Info]  E
     @discord.ui.button(label="W",        style=discord.ButtonStyle.secondary, custom_id="map_w",    row=1)
     async def w(self, i, b): await self._move(i, "w")
 
@@ -106,11 +110,16 @@ class MapView(View):
         if not h:
             await i.response.send_message("No hex data.", ephemeral=True)
             return
+        units = await db.get_satsuma_units(self.guild_id, self.owner_id)
+        here  = [u for u in units if u["hex_address"] == h["address"] and u.get("is_active")]
         embed = base_embed(
             h.get("location_name") or h["address"],
-            f"Terrain: {h['terrain'].replace('_',' ').title()}\n"
-            f"Controller: {h['controller'].title()}\n"
-            f"Explored: {h['is_explored']}",
+            (
+                f"Terrain: {h['terrain'].replace('_',' ').title()}\n"
+                f"Controller: {h['controller'].title()}\n"
+                f"Explored: {'Yes' if h['is_explored'] else 'No'}"
+                + (f"\n\nSatsuma units present: {len(here)}" if here else "")
+            ),
             COLOR_DEFAULT,
         )
         await i.response.send_message(embed=embed, ephemeral=True)
@@ -118,7 +127,7 @@ class MapView(View):
     @discord.ui.button(label="E",        style=discord.ButtonStyle.secondary, custom_id="map_e",    row=1)
     async def e(self, i, b): await self._move(i, "e")
 
-    # Row 2 — SW, S, SE
+    # Row 2 — SW  S  SE
     @discord.ui.button(label="SW", style=discord.ButtonStyle.secondary, custom_id="map_sw", row=2)
     async def sw(self, i, b): await self._move(i, "sw")
 
@@ -128,8 +137,8 @@ class MapView(View):
     @discord.ui.button(label="SE", style=discord.ButtonStyle.secondary, custom_id="map_se", row=2)
     async def se(self, i, b): await self._move(i, "se")
 
-    # Row 3 — End Turn, Refresh
-    @discord.ui.button(label="End Turn", style=discord.ButtonStyle.danger,     custom_id="map_end",     row=3)
+    # Row 3 — End Turn  Contracts  Refresh
+    @discord.ui.button(label="End Turn",  style=discord.ButtonStyle.danger,     custom_id="map_end",       row=3)
     async def end_turn(self, i: discord.Interaction, b: Button):
         if i.user.id != self.owner_id:
             await i.response.send_message("This is not your campaign.", ephemeral=True)
@@ -137,39 +146,32 @@ class MapView(View):
         await i.response.defer()
         events = []
 
-        # Upkeep
         cost, paid = await apply_upkeep(self.guild_id, self.owner_id)
         if not paid:
-            events.append(f"Could not pay upkeep ({cost} Coin). Band Loyalty reduced.")
+            events.append(f"Upkeep unpaid ({cost} Coin). Band Loyalty reduced.")
 
-        # Satsuma AI
         ai_events = await resolve_end_turn_ai(self.guild_id, self.owner_id)
         for ev in ai_events:
             if ev.startswith("encounter:"):
                 parts = ev.split(":")
-                utype = parts[1].replace("_"," ").title() if len(parts)>1 else "Satsuma unit"
-                events.append(f"Satsuma encounter triggered: {utype}.")
+                utype = parts[1].replace("_"," ").title() if len(parts)>1 else "Satsuma"
+                events.append(f"Satsuma encounter: {utype}.")
 
-        # Desertion
         deserters = await check_desertion(self.guild_id, self.owner_id)
         for d in deserters:
-            events.append(f"{d['member_name']} ({d['archetype']}) has deserted.")
+            events.append(f"{d['member_name']} ({d['archetype']}) deserted.")
 
-        # Loyalty thresholds
         events.extend(await threshold_effects(self.guild_id, self.owner_id))
 
-        # Traits
         new_traits = await check_and_assign_mc_traits(self.guild_id, self.owner_id)
         for t in new_traits:
-            events.append(f"New trait earned: {t}.")
+            events.append(f"New trait: {t}.")
 
-        # Haunted tick (tracked externally — remove after 5 turns)
         player = await db.get_player(self.guild_id, self.owner_id)
         if player and "Haunted" in (player.get("traits") or []):
-            counters = await db.get_trait_counters(self.guild_id, self.owner_id, "mc")
-            haunted_turns = counters.get("haunted_turns", 0) + 1
             await db.increment_trait_counter(self.guild_id, self.owner_id, "mc", "haunted_turns", 1)
-            if haunted_turns >= 5:
+            counters = await db.get_trait_counters(self.guild_id, self.owner_id, "mc")
+            if counters.get("haunted_turns", 0) >= 5:
                 await remove_haunted_trait(self.guild_id, self.owner_id)
                 events.append("Haunted has faded.")
 
@@ -178,10 +180,26 @@ class MapView(View):
             embed.add_field(name="End of Turn", value="\n".join(events[:10]), inline=False)
         await i.edit_original_response(embed=embed, attachments=files, view=self)
 
-    @discord.ui.button(label="Refresh",  style=discord.ButtonStyle.secondary, custom_id="map_refresh", row=3)
+    @discord.ui.button(label="Contracts", style=discord.ButtonStyle.secondary, custom_id="map_contracts", row=3)
+    async def contracts_btn(self, i: discord.Interaction, b: Button):
+        if i.user.id != self.owner_id:
+            await i.response.send_message("This is not your campaign.", ephemeral=True)
+            return
+        player = await db.get_player(self.guild_id, self.owner_id)
+        if not player or player.get("current_act",0) < 1:
+            await i.response.send_message(
+                embed=base_embed("Unavailable","Contracts unlock at Act 1.",COLOR_DEFEAT), ephemeral=True)
+            return
+        from views.contract_view import ContractBoardView
+        view  = ContractBoardView(self.guild_id, self.owner_id)
+        embed, _ = await view.build_embed()
+        await i.response.send_message(embed=embed, view=view, ephemeral=True)
+
+    @discord.ui.button(label="Refresh",   style=discord.ButtonStyle.secondary, custom_id="map_refresh",   row=3)
     async def refresh(self, i: discord.Interaction, b: Button):
         if i.user.id != self.owner_id:
             await i.response.send_message("This is not your campaign.", ephemeral=True)
             return
+        await i.response.defer()
         e, f = await self.build_map_embed()
-        await i.response.edit_message(embed=e, attachments=f, view=self)
+        await i.edit_original_response(embed=e, attachments=f, view=self)

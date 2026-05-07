@@ -1,6 +1,7 @@
 # Map Render
-# Detailed square-grid overworld map renderer using Pillow.
-# Legend panel shows actual rendered tile samples, not just color swatches.
+# Square-grid overworld map renderer with Pillow.
+# Features: terrain textures, fog of war, moves-per-turn bar,
+#           corner minimap, full region map, proper location labels.
 
 import math, random, io
 import discord
@@ -19,6 +20,10 @@ VIEW     = 15
 PAD      = 12
 HDR_H    = 60
 LEG_TILE = 24
+
+# Moves per turn = SPD stat
+def moves_for_spd(spd: int) -> int:
+    return max(1, spd // 3)
 
 NAMED_LOCATIONS = {
     "cave_of_refuge":    (30, 85),
@@ -56,6 +61,7 @@ TERRAINS = {
     "camp":          {"base":(158,128,65),  "acc":(118,92,40),   "dark":(80,62,22),  "label":"Camp"},
 }
 
+TERRAIN_COLORS_MINI = {k: v["base"] for k,v in TERRAINS.items()}
 BORDER = {k: tuple(max(0,c-30) for c in v["dark"]) for k,v in TERRAINS.items()}
 
 FOG        = (20, 20, 30)
@@ -80,10 +86,27 @@ IMPASSABLE = {"cliff_edge"}
 
 
 def addr(x:int,y:int)->str: return f"{x},{y}"
-def parse(a:str)->tuple: p=a.split(","); return int(p[0]),int(p[1])
+def parse(a:str)->tuple:
+    p=a.split(","); return int(p[0]),int(p[1])
 def in_bounds(x:int,y:int)->bool: return 0<=x<60 and 0<=y<120
 def _n(x,y,s=0): return ((x*1847+y*2311+s*997)%256)/255.0
 def _cl(v): return max(0,min(255,int(v)))
+
+
+def _load_fonts():
+    try:
+        return {
+            "title":   ImageFont.truetype(FONT_BOLD,13),
+            "sub":     ImageFont.truetype(FONT_BOLD, 9),
+            "sym":     ImageFont.truetype(FONT_BOLD,11),
+            "tiny":    ImageFont.truetype(FONT_BOLD, 7),
+            "micro":   ImageFont.truetype(FONT_BOLD, 6),
+            "compass": ImageFont.truetype(FONT_BOLD, 8),
+            "leg_sym": ImageFont.truetype(FONT_BOLD, 9),
+        }
+    except Exception:
+        d = ImageFont.load_default()
+        return {k: d for k in ("title","sub","sym","tiny","micro","compass","leg_sym")}
 
 
 def _draw_tile(draw, tx, ty, terrain, size=TILE, explored=True):
@@ -197,18 +220,88 @@ def _draw_compass(draw, cx, cy, r, fnt):
     draw.ellipse([cx-2,cy-2,cx+2,cy+2],fill=GOLD_LIGHT)
 
 
-def _make_mini(terrain:str, size:int=LEG_TILE) -> "Image.Image":
-    """Render a mini tile sample for the legend."""
-    mini=Image.new("RGB",(size,size),BG)
-    md=ImageDraw.Draw(mini)
-    _draw_tile(md,0,0,terrain,size,True)
+def _draw_moves_bar(draw, x, y, w, moves_left, moves_max, fnt):
+    """Draw a horizontal moves-remaining pip bar."""
+    h = 10
+    draw.rectangle([x,y,x+w,y+h],fill=(25,25,35),outline=GOLD_DIM)
+    if moves_max > 0:
+        filled = int(w * moves_left / moves_max)
+        if filled > 0:
+            col = (80,200,80) if moves_left == moves_max else \
+                  (200,180,50) if moves_left > moves_max//2 else (200,80,50)
+            draw.rectangle([x+1,y+1,x+filled-1,y+h-1],fill=col)
+    draw.text((x+w+5,y-1),f"Moves: {moves_left}/{moves_max}",font=fnt,fill=GOLD_DIM)
+
+
+def _draw_location_label(draw, cx, tile_top_y, label:str, fnt_tiny, fnt_micro):
+    """Draw a full location name below the tile, wrapping if needed."""
+    max_chars_per_line = 12
+    words = label.split()
+    lines = []
+    current = ""
+    for word in words:
+        test = (current + " " + word).strip()
+        if len(test) <= max_chars_per_line:
+            current = test
+        else:
+            if current:
+                lines.append(current)
+            current = word
+    if current:
+        lines.append(current)
+
+    # Draw each line below the tile
+    for i, line in enumerate(lines):
+        ly = tile_top_y + i * 9
+        draw.text((cx+1, ly+1), line, font=fnt_micro, fill=(0,0,0),        anchor="mt")
+        draw.text((cx,   ly),   line, font=fnt_micro, fill=(255,240,150),   anchor="mt")
+
+
+def _build_minimap(hex_rows:list, player_addr:str, view_half:int=7) -> "Image.Image":
+    """Build a small corner region overview (60x120 -> 3px per cell)."""
+    CELL  = 3
+    mw    = 60*CELL + 4
+    mh    = 120*CELL + 4
+    mini  = Image.new("RGB",(mw,mh),(12,12,18))
+    draw  = ImageDraw.Draw(mini)
+    px,py = parse(player_addr)
+    hex_map = {r["address"]:r for r in hex_rows}
+
+    for x in range(60):
+        for y in range(120):
+            a  = f"{x},{y}"
+            h  = hex_map.get(a)
+            cx = 2 + x*CELL; cy = 2 + y*CELL
+            x2 = cx+CELL-1;  y2 = cy+CELL-1
+            if not h or not h.get("is_explored"):
+                draw.rectangle([cx,cy,x2,y2],fill=FOG)
+            else:
+                terrain = h.get("terrain","jungle")
+                col     = TERRAIN_COLORS_MINI.get(terrain,TERRAIN_COLORS_MINI["jungle"])
+                draw.rectangle([cx,cy,x2,y2],fill=col)
+
+    # Named location dots
+    for loc,(nx,ny) in NAMED_LOCATIONS.items():
+        a = f"{nx},{ny}"
+        h = hex_map.get(a)
+        if h and h.get("is_explored"):
+            draw.ellipse([2+nx*CELL, 2+ny*CELL, 2+nx*CELL+CELL, 2+ny*CELL+CELL],
+                         fill=(255,200,60))
+
+    # Viewport box
+    vx1 = 2+max(0,px-view_half)*CELL
+    vy1 = 2+max(0,py-view_half)*CELL
+    vx2 = 2+min(60,px+view_half+1)*CELL
+    vy2 = 2+min(120,py+view_half+1)*CELL
+    draw.rectangle([vx1,vy1,vx2,vy2],outline=(200,200,60),width=1)
+
+    # Player dot
+    draw.ellipse([2+px*CELL, 2+py*CELL, 2+px*CELL+CELL+1, 2+py*CELL+CELL+1],
+                 fill=(255,225,40),outline=(180,140,0))
+
+    # Border
+    draw.rectangle([0,0,mw-1,mh-1],outline=FRAME_GOLD,width=1)
     return mini
-
-
-def _paste_legend_row(img, draw, bx, by, mini, label, border_col, fnt):
-    img.paste(mini,(bx,by))
-    draw.rectangle([bx-1,by-1,bx+LEG_TILE,by+LEG_TILE],outline=border_col,width=1)
-    draw.text((bx+LEG_TILE+5,by+LEG_TILE//2-4),label,font=fnt,fill=(185,180,160))
 
 
 def render_map(
@@ -219,6 +312,8 @@ def render_map(
     act_label:str="",
     loc_name:str="",
     player_stats:dict=None,
+    moves_left:int=None,
+    moves_max:int=None,
 ) -> "discord.File | None":
     if not PILLOW_OK:
         return None
@@ -227,52 +322,54 @@ def render_map(
     hex_map = {r["address"]:r for r in hex_rows}
     sat_set = {u["hex_address"] for u in satsuma_units if u.get("is_active")}
     half    = VIEW//2
+    F       = _load_fonts()
 
     grid_w = VIEW*TILE
     grid_h = VIEW*TILE
 
-    # Legend panel sizing
+    # Legend panel
     LEG_COLS    = 2
-    LEG_ROWS    = (len(TERRAINS)+1)//2
     col_w_leg   = 108
     LEG_PANEL_W = LEG_COLS*col_w_leg + 16
     COMPASS_H   = 68
-    EXTRA_ROWS  = 4   # fog, player, enemy, named
-    leg_content_h = COMPASS_H + 32 + LEG_ROWS*(LEG_TILE+8) + 12 + EXTRA_ROWS*(LEG_TILE+8)
+    LEG_ROWS    = (len(TERRAINS)+1)//2
+    EXTRA_ROWS  = 4
+    leg_content_h = COMPASS_H+32+LEG_ROWS*(LEG_TILE+8)+12+EXTRA_ROWS*(LEG_TILE+8)
 
-    img_w = PAD + grid_w + PAD + LEG_PANEL_W
-    img_h = HDR_H + PAD + max(grid_h, leg_content_h) + PAD
+    # Extra bottom space for moves bar
+    MOVES_BAR_H = 20 if moves_left is not None else 0
+
+    img_w = PAD+grid_w+PAD+LEG_PANEL_W
+    img_h = HDR_H+PAD+max(grid_h, leg_content_h)+PAD+MOVES_BAR_H
 
     img  = Image.new("RGB",(img_w,img_h),BG)
     draw = ImageDraw.Draw(img)
-
-    try:
-        fnt_title   = ImageFont.truetype(FONT_BOLD,13)
-        fnt_sub     = ImageFont.truetype(FONT_BOLD, 9)
-        fnt_sym     = ImageFont.truetype(FONT_BOLD,11)
-        fnt_tiny    = ImageFont.truetype(FONT_BOLD, 7)
-        fnt_compass = ImageFont.truetype(FONT_BOLD, 8)
-        fnt_leg_sym = ImageFont.truetype(FONT_BOLD, 9)
-    except Exception:
-        fnt_title=fnt_sub=fnt_sym=fnt_tiny=fnt_compass=fnt_leg_sym=ImageFont.load_default()
 
     # Header
     draw.rectangle([0,0,img_w,HDR_H],fill=(14,14,22))
     draw.line([(0,HDR_H-1),(img_w,HDR_H-1)],fill=FRAME_GOLD,width=2)
     for cx2,cy2 in [(4,4),(img_w-4,4)]:
         draw.ellipse([cx2-3,cy2-3,cx2+3,cy2+3],fill=GOLD_DIM)
-    draw.text((PAD,7),   "OVERWORLD MAP",font=fnt_title,fill=GOLD_LIGHT)
-    draw.text((PAD,24),  f"{act_label}  |  {loc_name}",font=fnt_sub,fill=(160,155,130))
-    draw.text((PAD,39),  f"Hex {px},{py}  |  Recon: {recon_radius}",font=fnt_tiny,fill=(110,108,95))
+    draw.text((PAD,7),  "OVERWORLD MAP",font=F["title"],fill=GOLD_LIGHT)
+    draw.text((PAD,24), f"{act_label}  |  {loc_name}",font=F["sub"],fill=(160,155,130))
+    draw.text((PAD,39), f"Hex {px},{py}  |  Recon: {recon_radius}",font=F["tiny"],fill=(110,108,95))
     if player_stats:
         sx=PAD+215
-        draw.text((sx,9),  f"HP {player_stats.get('hp','?')}/{player_stats.get('max_hp','?')}",font=fnt_sub,fill=(170,215,130))
-        draw.text((sx,25), f"ATK {player_stats.get('atk','?')}  DEF {player_stats.get('def','?')}  SPD {player_stats.get('spd','?')}",font=fnt_tiny,fill=(140,155,180))
+        draw.text((sx,9),  f"HP {player_stats.get('hp','?')}/{player_stats.get('max_hp','?')}",font=F["sub"],fill=(170,215,130))
+        draw.text((sx,25), f"ATK {player_stats.get('atk','?')}  DEF {player_stats.get('def','?')}  SPD {player_stats.get('spd','?')}",font=F["tiny"],fill=(140,155,180))
 
     grid_x = PAD
     grid_y = HDR_H+PAD
 
+    # Moves bar below grid (in image)
+    if moves_left is not None and moves_max:
+        bar_y = grid_y + grid_h + 6
+        _draw_moves_bar(draw, grid_x, bar_y, grid_w-60, moves_left, moves_max, F["tiny"])
+
     draw.rectangle([grid_x-2,grid_y-2,grid_x+grid_w+2,grid_y+grid_h+2],fill=(8,8,14))
+
+    # Collect named location label positions to draw after all tiles
+    label_queue = []
 
     # Tiles
     for dy in range(-half,half+1):
@@ -303,8 +400,17 @@ def render_map(
             explored=h.get("is_explored",False) or in_r
             is_named=h.get("is_named_location",False) if h else False
             _draw_tile(draw,tx2,ty2,terrain,TILE,explored)
-            if a in sat_set and in_r: _draw_enemy(draw,tx2,ty2)
-            elif is_named: _draw_named(draw,tx2,ty2,terrain,fnt_sym)
+
+            if a in sat_set and in_r:
+                _draw_enemy(draw,tx2,ty2)
+            elif is_named:
+                _draw_named(draw,tx2,ty2,terrain,F["sym"])
+                # Queue label — render after all tiles
+                loc_label=h.get("location_name","") if h else ""
+                if loc_label:
+                    label_cx  = tx2+TILE//2
+                    label_top = ty2+TILE+1  # just below tile bottom
+                    label_queue.append((label_cx, label_top, loc_label))
 
     # Grid lines
     for gx in range(VIEW+1):
@@ -318,92 +424,188 @@ def render_map(
                     (grid_x-2,grid_y+grid_h+1),(grid_x+grid_w+1,grid_y+grid_h+1)]:
         draw.ellipse([cx2-3,cy2-3,cx2+3,cy2+3],fill=GOLD_DIM,outline=FRAME_GOLD)
 
-    # Location labels
-    for dy in range(-half,half+1):
-        for dx in range(-half,half+1):
-            wx,wy=px+dx,py+dy; a=addr(wx,wy); h=hex_map.get(a)
-            if not h or not h.get("is_named_location") or not h.get("location_name"): continue
-            dist=max(abs(dx),abs(dy))
-            if not h.get("is_explored") and dist>recon_radius: continue
-            gx,gy=dx+half,dy+half
-            lx=grid_x+gx*TILE+TILE//2; label=h["location_name"][:11]
-            draw.text((lx+1,grid_y+gy*TILE-2),label,font=fnt_tiny,fill=(0,0,0),anchor="mb")
-            draw.text((lx,  grid_y+gy*TILE-3),label,font=fnt_tiny,fill=(255,240,150),anchor="mb")
+    # Location labels (rendered on top of grid, full name word-wrapped)
+    for (label_cx, label_top, loc_label) in label_queue:
+        # Clamp to grid bounds
+        if label_top > grid_y+grid_h-2:
+            label_top = grid_y+grid_h-18
+        _draw_location_label(draw, label_cx, label_top, loc_label, F["tiny"], F["micro"])
 
-    # RIGHT PANEL
+    # RIGHT PANEL — Legend
     rpx=grid_x+grid_w+PAD+4
     rpy=grid_y
 
-    # Compass
-    comp_cx=rpx+LEG_PANEL_W//2-4; comp_cy=rpy+28
-    _draw_compass(draw,comp_cx,comp_cy,22,fnt_compass)
+    _draw_compass(draw,rpx+LEG_PANEL_W//2-4,rpy+28,22,F["compass"])
 
-    # Legend header
     lsy=rpy+COMPASS_H
     draw.line([(rpx,lsy-4),(rpx+LEG_PANEL_W-6,lsy-4)],fill=FRAME_GOLD,width=1)
-    draw.text((rpx+4,lsy),  "TERRAIN LEGEND", font=fnt_tiny, fill=GOLD_LIGHT)
-    draw.text((rpx+4,lsy+11),"Gold ring = Named Location",font=fnt_tiny,fill=GOLD_DIM)
+    draw.text((rpx+4,lsy),  "TERRAIN LEGEND",font=F["tiny"],fill=GOLD_LIGHT)
+    draw.text((rpx+4,lsy+11),"Gold ring = Named Location",font=F["tiny"],fill=GOLD_DIM)
 
-    # Terrain tiles in 2-column grid
     lstart=lsy+26
     terrain_list=list(TERRAINS.items())
     for idx,(key,info) in enumerate(terrain_list):
         col=idx%LEG_COLS; row=idx//LEG_COLS
         bx=rpx+4+col*col_w_leg; by=lstart+row*(LEG_TILE+8)
-        mini=_make_mini(key,LEG_TILE)
-        _paste_legend_row(img,draw,bx,by,mini,info["label"],BORDER.get(key,(40,40,40)),fnt_tiny)
+        mini=Image.new("RGB",(LEG_TILE,LEG_TILE),BG)
+        md=ImageDraw.Draw(mini)
+        _draw_tile(md,0,0,key,LEG_TILE,True)
+        img.paste(mini,(bx,by))
+        draw.rectangle([bx-1,by-1,bx+LEG_TILE,by+LEG_TILE],outline=BORDER.get(key,(40,40,40)),width=1)
+        draw.text((bx+LEG_TILE+5,by+LEG_TILE//2-4),info["label"],font=F["tiny"],fill=(185,180,160))
 
-    # Extra marker rows
     rows_terrain=(len(terrain_list)+1)//LEG_COLS
     extra_y=lstart+rows_terrain*(LEG_TILE+8)+12
     draw.line([(rpx+4,extra_y-4),(rpx+LEG_PANEL_W-6,extra_y-4)],fill=FRAME_GOLD,width=1)
 
-    def _extra_row(img, draw, by, mini, label, border):
-        _paste_legend_row(img,draw,rpx+4,by,mini,label,border,fnt_tiny)
+    def _extra(by, mini_img, label, border):
+        img.paste(mini_img,(rpx+4,by))
+        draw.rectangle([rpx+3,by-1,rpx+4+LEG_TILE,by+LEG_TILE],outline=border,width=1)
+        draw.text((rpx+4+LEG_TILE+5,by+LEG_TILE//2-4),label,font=F["tiny"],fill=(185,180,160))
 
-    # Fog
+    # Fog sample
     m=Image.new("RGB",(LEG_TILE,LEG_TILE),FOG)
     md=ImageDraw.Draw(m)
     md.rectangle([0,0,LEG_TILE-1,LEG_TILE-1],fill=FOG,outline=FOG_LINE)
     for i in range(4):
         fx=int(_n(5,8,i*11)*(LEG_TILE-4))+2; fy=int(_n(6,9,i*11)*(LEG_TILE-4))+2
         md.ellipse([fx,fy,fx+1,fy+1],fill=(38,38,52))
-    _extra_row(img,draw,extra_y,m,"Fog of War",FOG_LINE)
+    _extra(extra_y,m,"Fog of War",FOG_LINE)
 
-    # Player
-    m2=_make_mini("jungle",LEG_TILE)
+    # Player sample
+    m2=Image.new("RGB",(LEG_TILE,LEG_TILE),TERRAINS["jungle"]["base"])
     md2=ImageDraw.Draw(m2)
+    _draw_tile(md2,0,0,"jungle",LEG_TILE,True)
     cx2,cy2=LEG_TILE//2,LEG_TILE//2
     for r2 in range(8,5,-1): md2.ellipse([cx2-r2,cy2-r2,cx2+r2,cy2+r2],outline=GOLD_LIGHT)
     md2.ellipse([cx2-5,cy2-5,cx2+5,cy2+5],fill=(255,225,40),outline=(180,140,0))
     md2.ellipse([cx2-2,cy2-2,cx2+2,cy2+2],fill=(80,50,0))
-    _extra_row(img,draw,extra_y+LEG_TILE+8,m2,"Your Position",(180,140,0))
+    _extra(extra_y+LEG_TILE+8,m2,"Your Position",(180,140,0))
 
-    # Enemy
-    m3=_make_mini("jungle",LEG_TILE)
+    # Enemy sample
+    m3=Image.new("RGB",(LEG_TILE,LEG_TILE),TERRAINS["jungle"]["base"])
     md3=ImageDraw.Draw(m3)
+    _draw_tile(md3,0,0,"jungle",LEG_TILE,True)
     ecx,ecy=LEG_TILE//2,LEG_TILE//2
     md3.ellipse([ecx-7,ecy-7,ecx+7,ecy+7],fill=(185,25,25),outline=(100,0,0))
     md3.line([(ecx-4,ecy-4),(ecx+4,ecy+4)],fill=(255,180,180),width=2)
     md3.line([(ecx+4,ecy-4),(ecx-4,ecy+4)],fill=(255,180,180),width=2)
-    _extra_row(img,draw,extra_y+(LEG_TILE+8)*2,m3,"Satsuma Unit",(100,0,0))
+    _extra(extra_y+(LEG_TILE+8)*2,m3,"Satsuma Unit",(100,0,0))
 
-    # Named location
-    m4=_make_mini("castle",LEG_TILE)
+    # Named sample
+    m4=Image.new("RGB",(LEG_TILE,LEG_TILE),TERRAINS["castle"]["base"])
     md4=ImageDraw.Draw(m4)
+    _draw_tile(md4,0,0,"castle",LEG_TILE,True)
     ncx,ncy=LEG_TILE//2,LEG_TILE//2
     md4.ellipse([ncx-7,ncy-7,ncx+7,ncy+7],outline=GOLD_LIGHT,width=2)
-    md4.text((ncx+1,ncy+1),"S",font=fnt_leg_sym,fill=(0,0,0),anchor="mm")
-    md4.text((ncx,  ncy),  "S",font=fnt_leg_sym,fill=(255,245,180),anchor="mm")
-    _extra_row(img,draw,extra_y+(LEG_TILE+8)*3,m4,"Named Location",FRAME_GOLD)
+    md4.text((ncx+1,ncy+1),"S",font=F["leg_sym"],fill=(0,0,0),anchor="mm")
+    md4.text((ncx,  ncy),  "S",font=F["leg_sym"],fill=(255,245,180),anchor="mm")
+    _extra(extra_y+(LEG_TILE+8)*3,m4,"Named Location",FRAME_GOLD)
 
-    # Panel border
     draw.rectangle([rpx-2,rpy-2,rpx+LEG_PANEL_W-2,rpy+grid_h+1],outline=FRAME_GOLD,width=1)
+
+    # Corner minimap — bottom-right of legend panel
+    mini_map = _build_minimap(hex_rows, player_addr)
+    mm_w, mm_h = mini_map.size
+    mm_x = img_w - mm_w - 4
+    mm_y = img_h - mm_h - 4
+    img.paste(mini_map,(mm_x,mm_y))
 
     buf=io.BytesIO()
     img.save(buf,format="PNG",optimize=True)
     buf.seek(0)
     return discord.File(buf,filename="map.png")
+
+
+def render_region_map(hex_rows:list, player_addr:str) -> "discord.File | None":
+    """Full-size standalone region map showing the entire 60x120 grid."""
+    if not PILLOW_OK:
+        return None
+
+    CELL  = 5    # bigger cells for standalone view
+    mw    = 60*CELL
+    mh    = 120*CELL
+    HDR   = 44
+    LEG   = 30
+    F     = _load_fonts()
+    img_w = mw + PAD*2
+    img_h = mh + PAD*2 + HDR + LEG
+
+    img  = Image.new("RGB",(img_w,img_h),BG)
+    draw = ImageDraw.Draw(img)
+    px,py= parse(player_addr)
+    hex_map={r["address"]:r for r in hex_rows}
+
+    # Header
+    draw.rectangle([0,0,img_w,HDR],fill=(14,14,22))
+    draw.line([(0,HDR-1),(img_w,HDR-1)],fill=FRAME_GOLD,width=2)
+    draw.text((PAD,7),  "REGION MAP — RYUKYU",font=F["title"],fill=GOLD_LIGHT)
+    draw.text((PAD,24), f"Position: {px},{py}  |  Bright box = Current View",font=F["tiny"],fill=(140,135,115))
+
+    mx=PAD; my=HDR+PAD
+
+    # Draw every cell
+    for x in range(60):
+        for y in range(120):
+            a  = f"{x},{y}"
+            h  = hex_map.get(a)
+            cx = mx+x*CELL; cy = my+y*CELL
+            x2 = cx+CELL-1; y2 = cy+CELL-1
+            if not h or not h.get("is_explored"):
+                draw.rectangle([cx,cy,x2,y2],fill=FOG)
+            else:
+                terrain=h.get("terrain","jungle")
+                col=TERRAIN_COLORS_MINI.get(terrain,TERRAIN_COLORS_MINI.get("jungle",(28,72,28)))
+                draw.rectangle([cx,cy,x2,y2],fill=col)
+
+    # Named location markers + labels
+    for loc,(nx,ny) in NAMED_LOCATIONS.items():
+        a = f"{nx},{ny}"
+        h = hex_map.get(a)
+        if h and h.get("is_explored"):
+            cx2=mx+nx*CELL+CELL//2; cy2=my+ny*CELL+CELL//2
+            draw.ellipse([cx2-3,cy2-3,cx2+3,cy2+3],fill=(255,200,60),outline=(180,140,0))
+            label = loc.replace("_"," ").title()
+            # Draw label to the right if space, else left
+            lx = cx2+6 if nx < 40 else cx2-6
+            anchor = "lm" if nx < 40 else "rm"
+            draw.text((lx+1,cy2+1),label,font=F["micro"],fill=(0,0,0),anchor=anchor)
+            draw.text((lx,  cy2),  label,font=F["micro"],fill=(255,240,150),anchor=anchor)
+
+    # Viewport box
+    half=VIEW//2
+    vx1=mx+max(0,px-half)*CELL; vy1=my+max(0,py-half)*CELL
+    vx2=mx+min(60,px+half+1)*CELL; vy2=my+min(120,py+half+1)*CELL
+    draw.rectangle([vx1,vy1,vx2,vy2],outline=(200,200,60),width=2)
+
+    # Player marker
+    pcx=mx+px*CELL+CELL//2; pcy=my+py*CELL+CELL//2
+    for r2 in range(6,3,-1): draw.ellipse([pcx-r2,pcy-r2,pcx+r2,pcy+r2],outline=GOLD_LIGHT)
+    draw.ellipse([pcx-3,pcy-3,pcx+3,pcy+3],fill=(255,225,40),outline=(180,140,0))
+
+    # Grid border
+    draw.rectangle([mx-2,my-2,mx+mw+1,my+mh+1],outline=FRAME_GOLD,width=2)
+
+    # Legend bar
+    leg_y=my+mh+6
+    draw.rectangle([0,leg_y,img_w,img_h],fill=(12,12,20))
+    draw.line([(0,leg_y),(img_w,leg_y)],fill=FRAME_GOLD,width=1)
+    items=[
+        ((255,225,40), "@ Your Position"),
+        ((255,200,60), "o Named Location"),
+        ((200,200,60), "  Current View"),
+        (FOG,          "  Unexplored"),
+    ]
+    lx2=PAD
+    for col,label in items:
+        draw.rectangle([lx2,leg_y+8,lx2+10,leg_y+20],fill=col,outline=(80,70,30))
+        draw.text((lx2+14,leg_y+6),label,font=F["tiny"],fill=(180,175,155))
+        lx2+=len(label)*5+24
+
+    buf=io.BytesIO()
+    img.save(buf,format="PNG",optimize=True)
+    buf.seek(0)
+    return discord.File(buf,filename="region_map.png")
 
 
 async def render_viewport(guild_id:int, owner_id:int) -> "discord.File | None":
@@ -416,11 +618,27 @@ async def render_viewport(guild_id:int, owner_id:int) -> "discord.File | None":
     units=await db.get_satsuma_units(guild_id,owner_id)
     h_row=await db.get_hex(guild_id,owner_id,a)
     loc=(h_row.get("location_name") or a) if h_row else a
+    spd=player.get("spd",8)
+    mx=moves_for_spd(spd)
+    # Moves left tracked per turn via trait counter
+    counters=await db.get_trait_counters(guild_id,owner_id,"mc")
+    ml=counters.get("moves_this_turn",0)
+    moves_left=max(0,mx-ml)
     from utils.embeds import act_label as al
     return render_map(a,hexes,units,radius,
         act_label=al(player.get("current_act",1)),loc_name=loc,
         player_stats={"hp":player.get("hp",60),"max_hp":player.get("max_hp",60),
-                      "atk":player.get("atk",8),"def":player.get("def",8),"spd":player.get("spd",8)})
+                      "atk":player.get("atk",8),"def":player.get("def",8),"spd":spd},
+        moves_left=moves_left, moves_max=mx)
+
+
+async def render_region(guild_id:int, owner_id:int) -> "discord.File | None":
+    player=await db.get_player(guild_id,owner_id)
+    if not player: return None
+    a=player.get("current_hex","30,85")
+    px,py=parse(a)
+    hexes=await db.get_viewport_hexes(guild_id,owner_id,px,py,half=60)
+    return render_region_map(hexes,a)
 
 
 def generate_viewport(player_addr,hex_rows,satsuma_units,recon_radius=3,viewport=17):

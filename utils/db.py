@@ -157,12 +157,22 @@ async def create_player(guild_id: int, owner_id: int, first_name: str, gender: s
     return dict(r)
 
 
+_PLAYER_JSONB = {"traits", "perks"}
+_PLAYER_COL_MAP = {"def_": "def"}  # Python keyword workaround
+
 async def update_player(guild_id: int, owner_id: int, **kw):
     if not kw:
         return
-    fields = list(kw.keys())
-    values = list(kw.values())
-    sets   = ",".join(f"{f}=${i+3}" for i, f in enumerate(fields))
+    # Remap reserved keyword aliases and serialize JSONB columns
+    clean = {}
+    for k, v in kw.items():
+        col = _PLAYER_COL_MAP.get(k, k)
+        if col in _PLAYER_JSONB and not isinstance(v, str):
+            v = json.dumps(v)
+        clean[col] = v
+    fields = list(clean.keys())
+    values = list(clean.values())
+    sets   = ",".join(f'"{f}"=${i+3}' for i, f in enumerate(fields))
     async with _pool.acquire() as c:
         await c.execute(
             f"UPDATE players SET {sets} WHERE guild_id=$1 AND owner_id=$2",
@@ -192,12 +202,19 @@ async def get_companion(guild_id: int, owner_id: int) -> dict | None:
         return _norm(dict(r), _JSONB_COLS["companions"]) if r else None
 
 
+_COMPANION_JSONB = {"traits"}
+
 async def update_companion(guild_id: int, owner_id: int, **kw):
     if not kw:
         return
-    fields = list(kw.keys())
-    values = list(kw.values())
-    sets   = ",".join(f"{f}=${i+3}" for i, f in enumerate(fields))
+    clean = {}
+    for k, v in kw.items():
+        if k in _COMPANION_JSONB and not isinstance(v, str):
+            v = json.dumps(v)
+        clean[k] = v
+    fields = list(clean.keys())
+    values = list(clean.values())
+    sets   = ",".join(f'"{f}"=${i+3}' for i, f in enumerate(fields))
     async with _pool.acquire() as c:
         await c.execute(
             f"UPDATE companions SET {sets} WHERE guild_id=$1 AND owner_id=$2",
@@ -246,12 +263,19 @@ async def add_band_member(guild_id: int, owner_id: int, name: str, archetype: st
         return dict(r)
 
 
+_BAND_JSONB = {"traits", "injuries"}
+
 async def update_band_member(member_id: int, **kw):
     if not kw:
         return
-    fields = list(kw.keys())
-    values = list(kw.values())
-    sets   = ",".join(f"{f}=${i+2}" for i, f in enumerate(fields))
+    clean = {}
+    for k, v in kw.items():
+        if k in _BAND_JSONB and not isinstance(v, str):
+            v = json.dumps(v)
+        clean[k] = v
+    fields = list(clean.keys())
+    values = list(clean.values())
+    sets   = ",".join(f'"{f}"=${i+2}' for i, f in enumerate(fields))
     async with _pool.acquire() as c:
         await c.execute(f"UPDATE band_members SET {sets} WHERE id=$1", member_id, *values)
 
@@ -384,14 +408,15 @@ async def get_items(guild_id: int, owner_id: int) -> list:
 
 async def add_item(guild_id: int, owner_id: int, item_key: str, qty: int = 1, is_relic: bool = False):
     async with _pool.acquire() as c:
-        if not is_relic:
-            ex = await c.fetchrow(
-                "SELECT id FROM items WHERE guild_id=$1 AND owner_id=$2 AND item_key=$3 AND is_relic=FALSE",
-                guild_id, owner_id, item_key
-            )
-            if ex:
+        # Always deduplicate by item_key — relics are unique, stackables accumulate qty
+        ex = await c.fetchrow(
+            "SELECT id,quantity FROM items WHERE guild_id=$1 AND owner_id=$2 AND item_key=$3",
+            guild_id, owner_id, item_key
+        )
+        if ex:
+            if not is_relic:
                 await c.execute("UPDATE items SET quantity=quantity+$2 WHERE id=$1", ex["id"], qty)
-                return
+            return  # Relic already exists — never duplicate
         await c.execute(
             "INSERT INTO items (guild_id,owner_id,item_key,quantity,is_relic) VALUES ($1,$2,$3,$4,$5)",
             guild_id, owner_id, item_key, qty, is_relic

@@ -26,14 +26,12 @@ class MapView(View):
         player  = await db.get_player(self.guild_id, self.owner_id)
         if not player:
             return base_embed("No player data.", color=COLOR_DEFEAT), []
-        viewport = await render_viewport(self.guild_id, self.owner_id)
         cur_hex  = player.get("current_hex","?")
         h        = await db.get_hex(self.guild_id, self.owner_id, cur_hex)
         loc_name = (h.get("location_name") or cur_hex) if h else cur_hex
 
         embed = discord.Embed(
             title=f"Overworld Map — {loc_name}",
-            description=viewport,
             color=COLOR_DEFAULT,
         )
         embed.add_field(name="Status", value=(
@@ -42,6 +40,12 @@ class MapView(View):
             f"Hex: {cur_hex}  |  SPD: {player.get('spd',8)}"
         ), inline=False)
         embed.set_footer(text="Use directional buttons to move. End Turn resolves AI and upkeep.")
+
+        # Rendered hex map image
+        map_file = await render_viewport(self.guild_id, self.owner_id)
+        if map_file:
+            embed.set_image(url="attachment://map.png")
+            return embed, [map_file]
         return embed, []
 
     async def _move(self, i: discord.Interaction, direction: str):

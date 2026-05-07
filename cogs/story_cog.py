@@ -15,8 +15,86 @@ class StoryCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
 
+    async def _get_or_create_thread(self, guild_id: int, owner_id: int) -> discord.Thread | None:
+        """Get the player's private forum thread, creating it if missing."""
+        player = await db.get_player(guild_id, owner_id)
+        if not player:
+            return None
+
+        # Return existing thread if stored
+        thread_id = player.get("forum_thread_id")
+        if thread_id:
+            thread = self.bot.get_channel(thread_id)
+            if thread:
+                return thread
+            # Fetch from API if not in cache
+            try:
+                thread = await self.bot.fetch_channel(thread_id)
+                return thread
+            except Exception:
+                pass  # Thread may have been deleted — recreate below
+
+        # Create a new thread
+        config = await db.get_guild_config(guild_id)
+        if not config or not config.get("forum_channel_id"):
+            return None
+        forum = self.bot.get_channel(config["forum_channel_id"])
+        if not forum or not isinstance(forum, discord.ForumChannel):
+            return None
+
+        guild  = self.bot.get_guild(guild_id)
+        member = guild.get_member(owner_id) if guild else None
+        username = member.display_name if member else f"Player {owner_id}"
+        mc_name  = f"Shimazu {player['mc_first_name']}" if player.get("mc_first_name") else username
+
+        thread_name = f"{username} — {mc_name}"
+
+        divider = "-" * 44
+        player_line = member.mention if member else username
+        desc = (
+            divider + "\n"
+            + "**Player:** " + player_line + "\n"
+            + "**Character:** " + mc_name + "\n"
+            + "**Campaign starts:** Act 0 - Before the Fire\n"
+            + divider + "\n\n"
+            + "This thread records your campaign. Story scenes and choices appear here."
+        )
+        opener = discord.Embed(
+            title="Ghost of Ryukyu",
+            description=desc,
+            color=0x2C3E50,
+        )
+
+        # GM role gets access — set allowed_mentions and thread tags if needed
+        gm_role_id = config.get("gm_role_id")
+
+        thread, _ = await forum.create_thread(
+            name=thread_name,
+            embed=opener,
+            reason=f"Ghost of Ryukyu campaign thread for {username}",
+        )
+
+        # Store thread ID on player
+        await db.update_player(guild_id, owner_id, forum_thread_id=thread.id)
+
+        # Invite GM role to thread if it exists
+        if gm_role_id and guild:
+            gm_role = guild.get_role(gm_role_id)
+            # Forum threads inherit channel permissions — private threads need explicit adds
+            # For forum channels, visibility is controlled at the channel level
+            # Just ping the thread so GMs with the role can see it
+            pass
+
+        return thread
+
     async def _post_to_commands(self, guild_id: int, owner_id: int,
                                   embed: discord.Embed, view=None, files: list = None):
+        """Post a story embed to the player's private forum thread."""
+        thread = await self._get_or_create_thread(guild_id, owner_id)
+        if thread:
+            return await thread.send(embed=embed, view=view, files=files or [])
+
+        # Fallback to commands channel if forum not configured
         config  = await db.get_guild_config(guild_id)
         if not config or not config.get("commands_channel_id"):
             return None
@@ -25,8 +103,8 @@ class StoryCog(commands.Cog):
             return None
         guild  = self.bot.get_guild(guild_id)
         member = guild.get_member(owner_id) if guild else None
-        content= member.mention if member else None
-        return await channel.send(content=content, embed=embed, view=view, files=files or [])
+        return await channel.send(content=member.mention if member else None,
+                                   embed=embed, view=view, files=files or [])
 
     async def deliver_scene(self, guild_id: int, owner_id: int, scene_key: str):
         player = await db.get_player(guild_id, owner_id)

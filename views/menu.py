@@ -30,6 +30,13 @@ class EnlistModal(Modal, title="Enlist — Ghost of Ryukyu"):
             return
         await db.create_player(interaction.guild_id, interaction.user.id, name, self.gender)
         comp = "Nabi" if self.gender == "male" else "Kenji"
+        # Trigger forum thread creation immediately on enlist
+        story_cog = interaction.client.cogs.get("StoryCog")
+        if story_cog:
+            import asyncio
+            asyncio.create_task(
+                story_cog._get_or_create_thread(interaction.guild_id, interaction.user.id)
+            )
         embed = discord.Embed(
             title="A Letter from Shimazu Takeo",
             description=(

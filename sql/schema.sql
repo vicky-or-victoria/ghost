@@ -10,6 +10,8 @@ DO $$ BEGIN
     ALTER TABLE guild_config ADD COLUMN IF NOT EXISTS menu_channel_id          BIGINT;
     ALTER TABLE guild_config ADD COLUMN IF NOT EXISTS menu_message_id          BIGINT;
     ALTER TABLE guild_config ADD COLUMN IF NOT EXISTS gm_role_id               BIGINT;
+    ALTER TABLE guild_config ADD COLUMN IF NOT EXISTS forum_channel_id          BIGINT;
+    ALTER TABLE players      ADD COLUMN IF NOT EXISTS forum_thread_id           BIGINT;
 EXCEPTION WHEN undefined_table THEN
     NULL;
 END $$;
@@ -23,6 +25,7 @@ CREATE TABLE IF NOT EXISTS guild_config (
     menu_channel_id         BIGINT,
     menu_message_id         BIGINT,
     gm_role_id              BIGINT,
+    forum_channel_id        BIGINT,
     created_at              TIMESTAMPTZ DEFAULT NOW()
 );
 
@@ -56,6 +59,7 @@ CREATE TABLE IF NOT EXISTS players (
     equipped_armor       TEXT,
     equipped_armor_tier  INTEGER DEFAULT 1,
     is_alive             BOOLEAN DEFAULT TRUE,
+    forum_thread_id      BIGINT,
     campaign_complete    BOOLEAN DEFAULT FALSE,
     grief_counter        INTEGER DEFAULT 0,
     created_at           TIMESTAMPTZ DEFAULT NOW(),

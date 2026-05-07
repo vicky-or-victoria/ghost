@@ -4,6 +4,7 @@ from discord import app_commands
 from discord.ui import View, Button, Modal, TextInput
 import utils.db as db
 from utils.embeds import base_embed, COLOR_GM, COLOR_DEFEAT, COLOR_WARNING
+import bot as _bot_module
 
 
 class SetChannelModal(Modal, title="Set Channel"):
@@ -34,6 +35,34 @@ class SetChannelModal(Modal, title="Set Channel"):
         ch = i.guild.get_channel(cid)
         await i.response.send_message(
             embed=base_embed("Channel Set", f"{role} -> {ch.mention if ch else cid}", COLOR_GM),
+            ephemeral=True)
+
+
+class SetForumChannelModal(Modal, title="Set Forum Channel"):
+    channel_id = TextInput(label="Forum Channel ID", placeholder="Right-click forum channel > Copy ID")
+
+    async def on_submit(self, i: discord.Interaction):
+        try:
+            cid = int(self.channel_id.value.strip())
+        except ValueError:
+            await i.response.send_message(
+                embed=base_embed("Invalid ID","Channel ID must be a number.",COLOR_DEFEAT),
+                ephemeral=True); return
+        ch = i.guild.get_channel(cid)
+        if ch is None:
+            await i.response.send_message(
+                embed=base_embed("Channel Not Found","Could not find that channel.",COLOR_DEFEAT),
+                ephemeral=True); return
+        if not isinstance(ch, discord.ForumChannel):
+            await i.response.send_message(
+                embed=base_embed("Wrong Channel Type",
+                    "That channel is not a Forum channel. "
+                    "Create a Forum channel in Discord first, then set it here.",COLOR_DEFEAT),
+                ephemeral=True); return
+        await db.upsert_guild_config(i.guild_id, forum_channel_id=cid)
+        await i.response.send_message(
+            embed=base_embed("Forum Channel Set",
+                f"Player story threads will be created in {ch.mention}.",COLOR_GM),
             ephemeral=True)
 
 
@@ -203,6 +232,7 @@ async def _server_status(i: discord.Interaction):
     embed.add_field(name="Hall of Fame",     value=ch(config.get("hall_of_fame_channel_id")), inline=True)
     embed.add_field(name="Leaderboard",      value=ch(config.get("leaderboard_channel_id")),  inline=True)
     embed.add_field(name="GM Role",          value=ro(config.get("gm_role_id")),              inline=True)
+    embed.add_field(name="Forum Channel",    value=ch(config.get("forum_channel_id")),       inline=True)
     await i.response.send_message(embed=embed, ephemeral=True)
 
 
@@ -212,15 +242,17 @@ _PAGES = [
         "body": (
             "**Set Channel** — Assign a Discord channel to a bot role.\n"
             "Roles: `menu`  `commands`  `announcements`  `hall_of_fame`  `leaderboard`\n\n"
+            "**Set Forum Channel** — Set the private forum channel for player story threads.\n\n"
             "**Set GM Role** — Choose which role can access this panel.\n\n"
             "**Deploy Menu** — Post the persistent main menu in the menu channel.\n\n"
             "**Server Status** — View current configuration."
         ),
         "actions": [
-            ("Set Channel",   "set_channel"),
-            ("Set GM Role",   "set_gm_role"),
-            ("Deploy Menu",   "deploy_menu"),
-            ("Server Status", "server_status"),
+            ("Set Channel",        "set_channel"),
+            ("Set Forum Channel",  "set_forum_channel"),
+            ("Set GM Role",        "set_gm_role"),
+            ("Deploy Menu",        "deploy_menu"),
+            ("Server Status",      "server_status"),
         ],
     },
     {
@@ -251,6 +283,7 @@ class ActionButton(Button):
     async def callback(self, i: discord.Interaction):
         a = self.action
         if   a == "set_channel":   await i.response.send_modal(SetChannelModal())
+        elif a == "set_forum_channel": await i.response.send_modal(SetForumChannelModal())
         elif a == "set_gm_role":   await i.response.send_modal(SetGMRoleModal())
         elif a == "deploy_menu":   await _deploy_menu(i)
         elif a == "server_status": await _server_status(i)
@@ -300,15 +333,17 @@ class AdminCog(commands.Cog):
 
     @app_commands.command(name="gm_panel", description="Open the GM control panel.")
     async def gm_panel(self, i: discord.Interaction):
-        config = await db.get_guild_config(i.guild_id)
-        is_gm  = False
-        if config and config.get("gm_role_id"):
+        config   = await db.get_guild_config(i.guild_id)
+        owner_id = getattr(_bot_module, "OWNER_ID", 0)
+        is_owner = (i.user.id == owner_id) if owner_id else False
+        is_gm    = is_owner
+        if not is_gm and config and config.get("gm_role_id"):
             role = i.guild.get_role(config["gm_role_id"])
             if role and role in i.user.roles:
                 is_gm = True
-        if not is_gm and not i.user.guild_permissions.administrator:
+        if not is_gm:
             await i.response.send_message(
-                embed=base_embed("Access Denied","GM role or Administrator required.",COLOR_DEFEAT),
+                embed=base_embed("Access Denied","GM role required. Bot owner can set one via OWNER_ID env var.",COLOR_DEFEAT),
                 ephemeral=True); return
         view = GMPanelView(page=0)
         await i.response.send_message(embed=view.build_embed(), view=view, ephemeral=True)

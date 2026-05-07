@@ -13,6 +13,8 @@ logging.basicConfig(
 )
 log = logging.getLogger("ghost_of_ryukyu")
 
+OWNER_ID = int(os.environ.get("OWNER_ID", 0))
+
 COGS = [
     "cogs.admin_cog",
     "cogs.story_cog",
